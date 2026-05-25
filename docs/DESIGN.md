@@ -21,7 +21,9 @@ Let a user attach their iPad as a real **extended display** of a Windows PC over
 
 - Appears in Windows **Display Settings** as a second monitor with selectable resolution and refresh rate.
 - End-to-end glass-to-glass latency under **80 ms** on a quiet 5 GHz Wi-Fi network at 1920×1200 @ 60 Hz.
-- Touch on the iPad moves the Windows cursor; tap = left click; two-finger tap = right click.
+- Touch on the iPad moves the Windows cursor; tap = left click; two-finger tap = right click; two-finger pan = scroll.
+- Hardware keyboard (Magic Keyboard / BT) types into Windows with full international-layout fidelity (USB HID usage codes + `chars` on the wire — not PS/2 set 1).
+- **mDNS / Bonjour** host discovery — no manual URL entry on the iPad.
 - Survives sleep / wake / Wi-Fi flap without requiring a Windows reboot.
 - Pairing model that doesn't expose the host to any device on the LAN.
 
@@ -205,7 +207,7 @@ Coordinates are normalized to the *target monitor*, not the iPad screen, so reso
 
 - Touch / mouse → `SendInput` with `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`, using the virtual monitor's coordinates.
 - Pencil pressure → Windows Pointer Input Messages (`InjectSyntheticPointerInput` from `User32`), so apps that respect Windows Ink (OneNote, Photoshop, Krita, Affinity) get real pressure. Requires the host to register a synthetic pointer device per pencil tool.
-- Keyboard → `SendInput` with `KEYEVENTF_SCANCODE`.
+- Keyboard → host receives a USB HID **usage code** plus the `chars` the iPad reported via `UIKey.charactersIgnoringModifiers`. The host maps usage codes to virtual-key codes via `MapVirtualKeyExW`/the active KLID and calls `SendInput` with `KEYEVENTF_SCANCODE` (or `KEYEVENTF_UNICODE` when `chars` is the only reliable input — dead keys, IME, AltGr-only glyphs). PS/2 scancodes are **not** sent over the wire — that would silently break every non-US layout.
 
 We deliberately **do not** install a virtual HID driver in v1.0 — `SendInput` + `InjectSyntheticPointerInput` cover what we need without another signing burden. ViGEm-style HID is a v2 option if we discover edge cases (per-app raw input filtering, anti-cheat games).
 
@@ -283,7 +285,7 @@ Mitigations:
 - **Host service hardening**:
   - Runs as `LocalService` with explicit privileges, not `LocalSystem`. Uses `WTSQueryUserToken` to get the interactive user's token for `SendInput`.
   - No COM / RPC surfaces exposed to non-admin local users.
-  - All input from the iPad is validated (normalized coords, no out-of-range scancodes).
+  - All input from the iPad is validated (normalized coords; HID usage codes bounded to page 0x07; `chars` length-capped).
 - **Driver hardening**:
   - User-mode (UMDF); a crash takes down the driver host, not the kernel.
   - No data parsed from the wire inside the driver. The driver only receives shared D3D textures from `winext-host.exe`.
@@ -306,41 +308,37 @@ Out of scope for v1.0: defense against a fully-compromised paired iPad. If your 
 
 The point of breaking this into phases is to have something demonstrable at the end of each phase rather than a 6-month invisible march.
 
-### Phase 0 — Spike (1 week)
-- Get Microsoft's `IddSampleDriver` building and installed in test mode.
-- Verify a fake monitor appears in Display Settings and we can drag a window onto it.
-- Capture one frame and dump it to disk.
+**Phases 0–1 (the MVP)** are scoped in `docs/MVP.md` as M0..M5 (~7 wk realistic / ~9 wk safe). The phase descriptions below cover Phase 2 onward — what happens *after* the MVP lands.
 
-### Phase 1 — Mirror over the wire (3 weeks)
-- Skip the driver entirely. Use Desktop Duplication to capture the primary monitor.
-- NVENC encode + libwebrtc transport + iPad client that decodes and displays.
-- No input. No pairing. Hard-coded IP. Goal: prove the streaming stack on its own.
+### Phase 0+1 — MVP (~7–9 weeks)
+See `docs/MVP.md`. Endpoint: a single test rig demonstrates extending a Windows desktop to one iPad with touch + two-finger gestures + mDNS discovery; six acceptance criteria pass.
 
-### Phase 2 — Replace capture with virtual monitor (2 weeks)
-- Swap DDA capture for the IddCx driver feeding the same encoder.
-- Now we're extending instead of mirroring.
+### Phase 2 — v0.2: Pencil pressure + hardware keyboard + auto-recovery (~3 weeks)
+- Apple Pencil pressure + tilt → Windows Ink via `InjectSyntheticPointerInput`. **The wedge.**
+- Hardware keyboard pass-through with USB HID + `chars` (full international layout fidelity).
+- ICE restart + SDP renegotiation for transparent Wi-Fi blip recovery.
+- Pinch-to-zoom + three-finger gestures.
+- Quick Sync + AMF encoder probes (Intel / AMD parity with the NVENC fast path).
 
-### Phase 3 — Input back-channel (2 weeks)
-- DataChannel + CBOR protocol.
-- `SendInput` mouse + keyboard.
-- `InjectSyntheticPointerInput` for Pencil pressure.
+### Phase 3 — v0.3: pairing, multi-iPad, audio (~3 weeks)
+- SPAKE2 PIN pairing replaces shared room codes.
+- Optional support for more than one iPad against a single host.
+- Audio forwarding via a virtual audio device (separate signing exercise).
+- TURN-relayed / internet-relayed mode.
 
-### Phase 4 — Pairing, discovery, polish (2 weeks)
-- mDNS discovery.
-- SPAKE2 PIN pairing.
-- Cert pinning. Hot-plug. Sleep/wake survival.
+### Phase 4 — v1.0: signing & distribution (~2 weeks, mostly waiting)
+- Buy EV cert (Sectigo / DigiCert; ~$300/yr; ~2 wk to deliver).
+- Submit driver to Microsoft Hardware Dev Center for attestation signing.
+- Build MSIX installer for Windows.
+- Submit iPad client to TestFlight (Apple Developer account already in place from MVP).
 
-### Phase 5 — Signing & installer (2 weeks, mostly waiting)
-- Buy EV cert.
-- Sign driver + host.
-- Submit to Hardware Dev Center for attestation.
-- Build MSIX installer.
+### Phase 5 — public release & maintenance (ongoing)
+- TestFlight beta → App Store submission.
+- Telemetry + crash reporting.
+- Public docs / website.
+- Bonfire test: 5 strangers install end-to-end with us not in the room.
 
-### Phase 6 — TestFlight beta (ongoing)
-- Submit iPad app.
-- Internal beta, then external.
-
-**Total to v1.0 beta: ~12 calendar weeks for one engineer**, assuming no signing delays.
+**Total to v1.0 public release: ~16–18 calendar weeks for one engineer**, dominated by the EV cert lead time and Apple review cycles.
 
 ---
 

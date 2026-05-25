@@ -53,9 +53,14 @@ export interface PointerEvent {
 
 export interface KeyEvent {
   t: "key";
-  // PS/2 scancode (set 1) so the host can call SendInput with KEYEVENTF_SCANCODE
-  // without re-mapping. iPad client maintains the USB-HID -> scancode table.
-  scancode: number;
+  // USB HID usage code from page 0x07 (Keyboard / Keypad), read directly
+  // off UIKey on iOS. The host maps usage -> VK/scancode via the active
+  // KLID; PS/2 set 1 is NOT used on the wire because it loses AltGr,
+  // dead keys, and non-US layouts.
+  hidUsage: number;
+  // `UIKey.charactersIgnoringModifiers`. Lets the host fall back to
+  // `KEYEVENTF_UNICODE` for IME / dead keys / AltGr-only glyphs.
+  chars: string;
   phase: "down" | "up";
   // Optional repeat marker for autorepeat from the iPad keyboard.
   repeat?: boolean;
