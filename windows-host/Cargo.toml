@@ -5,12 +5,21 @@ edition = "2021"
 publish = false
 description = "Windows host for the WinExt iPad screen-extender (Phase 1: mirror over WebRTC)"
 
+[lib]
+name = "winext"
+path = "src/lib.rs"
+
 [[bin]]
 name = "winext-host"
-path = "src/main.rs"
+path = "src/bin/host.rs"
+
+[[bin]]
+name = "winext-viewer"
+path = "src/bin/viewer.rs"
 
 [dependencies]
 anyhow = "1"
+bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -20,9 +29,7 @@ tokio-tungstenite = "0.24"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 uuid = { version = "1", features = ["v4"] }
-
-# WebRTC stack (pure-Rust). Heavy; we pin a known-good version.
-# webrtc = "0.11"  # Uncomment when Phase 1 starts; commented to keep first-build fast.
+webrtc = "0.11"
 
 # Windows API bindings. Phase 1 only needs DXGI + D3D11 for Desktop Duplication
 # capture; Phase 2 adds IddCx (separate driver crate).
