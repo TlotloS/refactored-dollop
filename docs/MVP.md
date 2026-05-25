@@ -79,8 +79,19 @@ the differentiator (Apple Pencil pressure → Windows Ink) lands in v0.2.
     delta normalized to lines, sent as `MOUSEEVENTF_WHEEL`; horizontal
     delta sent as `MOUSEEVENTF_HWHEEL`).
   - No pinch. No three-finger gestures. No trackpad pointer.
-- Hardware-keyboard pass-through is **deferred to v0.2** alongside Pencil
-  pressure and the rest of the input richness.
+- Hardware-keyboard pass-through (**minimal subset only**):
+  - **Printable Unicode characters** (alphanumerics, symbols) → sent via
+    `KEYEVENTF_UNICODE`. Works for any layout *because we never look at
+    the layout* — the iPad gives us the characters the user typed and we
+    inject them as Unicode.
+  - **Navigation keys**: Arrow keys, Home, End, Page Up, Page Down, Tab,
+    Enter, Escape, Backspace, Delete → mapped from HID usage code to
+    Windows virtual-key code, sent via `KEYEVENTF_SCANCODE`.
+  - **Modifier combos**: Ctrl-F, Ctrl-C, Ctrl-V, Ctrl-A, Ctrl-Z, Ctrl-Y
+    → modifier held + key via VK.
+  - **Out of MVP, deferred to v0.2**: AltGr, dead keys, IME composition,
+    function keys, Win/Cmd key combos, full KLID-aware layout fidelity.
+    This is the "full HID + chars on the wire" path.
 - **Apple Developer Program account ($99/yr) required** even for MVP:
   free-tier sideload profiles expire every 7 days, which would brick
   AC #4 / AC #5 on day 8 of testing.
@@ -108,16 +119,20 @@ The MVP is **done** when, on a single test rig, all six of these are true:
    1920×1200 60 Hz. Measurement is **not** visual; the host emits a
    monotonic timestamp `t_input_at_host` on each pointer event it
    injects, and the iPad logs `t_render_on_ipad` when the resulting
-   frame draws. The delta is the metric. Encoder choice is whatever the
-   AC rig probes (MF or optional NVENC); the AC must pass on at least
-   one configuration of the test rig.
+   frame draws. The delta is the metric. **The AC must pass on the
+   mandatory Media Foundation encoder path** — that is the universal
+   fallback every user will run. The optional NVENC fast path may
+   *improve* numbers but cannot be used to *pass* the AC.
 4. **Input round-trip**: tapping a button rendered on the iPad clicks
-   that button in the Windows app. Two-finger tap right-clicks. Two-finger
-   pan scrolls a long document. (Hardware keyboard is **not** tested in
-   MVP — deferred to v0.2.)
+   that button in the Windows app. Two-finger tap right-clicks.
+   Two-finger pan scrolls a long document. Typing a sentence on the
+   Magic Keyboard reaches the focused Windows text field. Ctrl-F opens
+   the find dialog. Arrow keys navigate a scrolled view.
 5. **Usable as a monitor**: a tester reads a 10-page PDF and watches a
    5-minute 1080p video on the iPad without reaching for the PC — no
-   pause, no swap, no fall-back to the primary monitor.
+   pause, no swap, no fall-back to the primary monitor. (Audio plays
+   from the **PC's** speakers; audio forwarding to the iPad is a
+   known v0.3 gap, see §3.2.)
 6. **Stability**: a **10-minute** continuous session without
    disconnects, BSODs, or driver crashes.
 
@@ -141,7 +156,7 @@ Listed so we don't argue about them mid-build.
 | **Apple Pencil pressure → Windows Ink**           | The wedge. v0.2 headline feature.                              |
 | Pinch-to-zoom + three-finger gestures             | Needs gesture FSM; design before code.                         |
 | Trackpad pointer (Magic Keyboard trackpad)        | Needs `UIPointerInteraction` plumbing.                         |
-| Hardware-keyboard pass-through                    | USB HID scancode map + dead-key / AltGr handling; lands next to gestures. |
+| Full hardware-keyboard fidelity (AltGr, dead keys, IME, function keys, KLID-aware) | MVP ships a Unicode-only subset; full HID + layout-aware path lands next to Pencil. |
 | Auto-recovery from Wi-Fi blip                     | ICE restart + SDP renegotiation; manual reconnect is fine for MVP. |
 | Quick Sync / AMF probing                          | NVENC fast path is in MVP (optional); Intel/AMD parity is v0.2. |
 
@@ -181,15 +196,18 @@ demoable artifact, not a code-org checkpoint.
 |-----------|----------------------------------------------------------------------------------|-------------|
 | **M0**    | Signaling server live (already done). iPad client builds in Xcode. Rust host `cargo check` clean. | done       |
 | **M1**    | Hard-coded test pattern (via a custom `VideoTrackSource` — you cannot push raw PNG into an `RTCVideoTrack`) streamed from Windows host to iPad over WebRTC and rendered to Metal. No real capture, no encode, no input. Proves WebRTC plumbing on both ends. | 1 wk |
-| **M1.5** | **Interop smoke test.** `webrtc-rs` ↔ `WebRTC.xcframework` negotiate H.264 Constrained Baseline + Main with `packetization-mode=1` and transport-cc; iPad renders a real-encoded frame, not black. If this fails, transport plan changes before any further work. | 0.5 wk |
+| **M1.5** | **Interop smoke test.** `webrtc-rs` (offerer) ↔ `WebRTC.xcframework` (answerer) negotiate H.264 with: `profile-level-id=42e01f` (Constrained Baseline 3.1) primary + `4d001f` (Main 3.1) fallback, `level-asymmetry-allowed=1`, `packetization-mode=1`, `max-fs=8160 max-mbps=245000` (1080p60), `sprop-parameter-sets` in-band (we do not rely on out-of-band SPS/PPS). transport-cc on. iPad renders a real-encoded frame, not black. If this fails, the transport plan changes before any further work. | 0.5 wk |
 | **M2**    | DXGI Desktop Duplication captures the **primary** monitor; Media Foundation H.264 encodes; iPad displays the live primary desktop (mirror, not extend). NVENC fast path probed and used if present. | 1.5 wk |
-| **M3**    | Touch + two-finger gestures move the Windows cursor, click, right-click, scroll — on the mirrored primary desktop. mDNS host discovery on the iPad works. (Demoable end-to-end *without* the driver.) | 1.5 wk |
+| **M3**    | Touch + two-finger gestures move the Windows cursor, click, right-click, scroll — on the mirrored primary desktop. Minimal Unicode-only keyboard reaches Windows (printable chars + navigation keys + Ctrl-F/C/V/A/Z/Y). mDNS host discovery on the iPad works. (Demoable end-to-end *without* the driver.) | 2 wk |
 | **M4**    | IddCx virtual monitor lands. UMDF driver in `WUDFHost` consumes its own swap-chain and IPCs textures to `winext-host.exe`. The system swaps from mirroring the primary to extending onto the virtual monitor. DDA deleted. | 2 wk |
 | **M5**    | Polish: bind-to-LAN NIC, manual-reconnect button, six acceptance criteria pass. | 0.5 wk |
 
-**Total MVP estimate: ~7 weeks realistic, ~9 weeks safe.** The previous
-5.5 wk figure underbudgeted the IddCx UMDF + IPC work, the WebRTC iOS
-interop smoke test, and the dev-box prep in §5.
+**Total MVP estimate: ~7.5 weeks realistic, ~9.5 weeks safe.** Sum of
+milestone budgets is 7.5 wk (1 + 0.5 + 1.5 + 2 + 2 + 0.5). The 2-wk
+buffer covers IddCx UMDF + IPC churn and dev-box-prep friction (§5).
+The previous 5.5 wk figure underbudgeted IddCx, the WebRTC iOS interop
+test, the §5 dev-box prep, and the minimal keyboard subset (added back
+in M3 to close the AC #5 trap).
 
 The milestone order is deliberate: **M3 (input + gestures + discovery)
 is before M4 (driver)** so an IddCx schedule slip cannot block a
@@ -199,6 +217,22 @@ is not.
 ---
 
 ## 5. Test rig (what we develop and demo on)
+
+### Prerequisites you must have before M1 starts
+
+These are hard blockers. If any of them is not in place, the milestone
+that needs it stalls.
+
+- **Mac running Xcode 15+** for building the iPad client. Apple's
+  signing chain has no escape hatch — no Mac, no MVP.
+- **Apple Developer Program membership ($99/yr)**. The free-tier
+  sideload profile expires every 7 days; AC #5 and AC #6 cannot pass on
+  day 8 without a paid account.
+- **Windows test rig where Secure Boot and HVCI can be turned off**
+  (most personal laptops; some corporate-managed laptops cannot, in
+  which case MVP cannot be tested on them).
+- **NVIDIA GPU is recommended but not required.** AC #3 must pass on
+  Media Foundation regardless.
 
 ### Hardware
 

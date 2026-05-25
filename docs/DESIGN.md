@@ -313,9 +313,9 @@ The point of breaking this into phases is to have something demonstrable at the 
 ### Phase 0+1 — MVP (~7–9 weeks)
 See `docs/MVP.md`. Endpoint: a single test rig demonstrates extending a Windows desktop to one iPad with touch + two-finger gestures + mDNS discovery; six acceptance criteria pass.
 
-### Phase 2 — v0.2: Pencil pressure + hardware keyboard + auto-recovery (~3 weeks)
+### Phase 2 — v0.2: Pencil pressure + full keyboard fidelity + auto-recovery (~3 weeks)
 - Apple Pencil pressure + tilt → Windows Ink via `InjectSyntheticPointerInput`. **The wedge.**
-- Hardware keyboard pass-through with USB HID + `chars` (full international layout fidelity).
+- **Full** hardware-keyboard layout fidelity: USB HID + `chars` on the wire, KLID-aware mapping, AltGr, dead keys, IME composition, function keys. (MVP shipped a Unicode-only subset; v0.2 closes the international-layout gap.)
 - ICE restart + SDP renegotiation for transparent Wi-Fi blip recovery.
 - Pinch-to-zoom + three-finger gestures.
 - Quick Sync + AMF encoder probes (Intel / AMD parity with the NVENC fast path).
