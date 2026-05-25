@@ -1,5 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { extname, join, normalize, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { SignalingMessage, ErrorCode } from "../../protocol/messages.js";
 import { RoomRegistry, type Peer } from "./room.js";
@@ -7,17 +10,41 @@ import { log } from "./log.js";
 
 const PORT = Number(process.env.PORT ?? 8443);
 const HOST = process.env.HOST ?? "0.0.0.0";
+const PUBLIC_DIR = join(fileURLToPath(new URL(".", import.meta.url)), "..", "public");
 
 const rooms = new RoomRegistry();
 
-const http = createServer((req: IncomingMessage, res: ServerResponse) => {
+const MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+};
+
+const http = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   if (req.url === "/healthz") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true, rooms: rooms.count() }));
     return;
   }
-  res.writeHead(404);
-  res.end();
+  // Static file serving from signaling/public/.
+  const rawPath = req.url === "/" || !req.url ? "/viewer.html" : req.url.split("?")[0]!;
+  const normalized = normalize(rawPath).replace(/^(\.\.[/\\])+/, "");
+  if (normalized.startsWith("..") || normalized.includes(`..${sep}`)) {
+    res.writeHead(403);
+    res.end();
+    return;
+  }
+  const filePath = join(PUBLIC_DIR, normalized);
+  try {
+    const data = await readFile(filePath);
+    res.writeHead(200, { "content-type": MIME[extname(filePath)] ?? "application/octet-stream" });
+    res.end(data);
+  } catch {
+    res.writeHead(404);
+    res.end();
+  }
 });
 
 const wss = new WebSocketServer({ server: http, path: "/ws" });

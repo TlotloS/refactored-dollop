@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
+  <title>WinExt viewer</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #000; color: #eee;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+    .wrap { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
+    header { padding: 12px 16px; background: #111; border-bottom: 1px solid #222;
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    header input { background: #222; color: #eee; border: 1px solid #333;
+      border-radius: 6px; padding: 6px 10px; font-size: 14px; }
+    header input[type=text] { width: 180px; }
+    header button { background: #2a6; color: #fff; border: 0; border-radius: 6px;
+      padding: 6px 14px; font-size: 14px; cursor: pointer; }
+    header button:disabled { background: #444; cursor: not-allowed; }
+    header .spacer { flex: 1; }
+    header .state { font-size: 13px; opacity: 0.8; }
+    main { display: grid; place-items: center; overflow: hidden; }
+    video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+    footer { padding: 8px 16px; background: #111; border-top: 1px solid #222;
+      font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      opacity: 0.9; min-height: 1em; }
+    .placeholder { color: #666; text-align: center; padding: 40px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <input id="url" type="text" />
+      <input id="room" type="text" placeholder="ROOM" autocapitalize="characters" autocomplete="off" />
+      <button id="go">Connect</button>
+      <span class="spacer"></span>
+      <span class="state" id="state">idle</span>
+    </header>
+    <main>
+      <video id="v" autoplay playsinline muted></video>
+      <div class="placeholder" id="placeholder">enter a room code and tap Connect</div>
+    </main>
+    <footer id="stats">—</footer>
+  </div>
+  <script>
+    (() => {
+      const $ = (id) => document.getElementById(id);
+      const v = $("v"), state = $("state"), stats = $("stats"), placeholder = $("placeholder");
+      // Default signaling URL = same host as this page, on /ws.
+      const defaultUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+      $("url").value = defaultUrl;
+
+      let pc = null, ws = null, statsTimer = null, bytesPrev = 0;
+
+      const setState = (s) => { state.textContent = s; };
+
+      const connect = async () => {
+        const wsUrl = $("url").value.trim();
+        const room = $("room").value.trim().toUpperCase();
+        if (!room) { setState("need room"); return; }
+        $("go").disabled = true;
+        setState("connecting…");
+        placeholder.style.display = "none";
+        v.style.display = "";
+
+        pc = new RTCPeerConnection({ iceServers: [] });
+        pc.addTransceiver("video", { direction: "recvonly" });
+        pc.ontrack = (e) => {
+          v.srcObject = e.streams[0] || new MediaStream([e.track]);
+          setState("track");
+          startStats();
+        };
+        pc.onconnectionstatechange = () => setState("pc:" + pc.connectionState);
+        pc.oniceconnectionstatechange = () => setState("ice:" + pc.iceConnectionState);
+        pc.onicecandidate = (e) => {
+          if (e.candidate && ws && ws.readyState === 1) {
+            ws.send(JSON.stringify({ kind: "ice", candidate: e.candidate.toJSON() }));
+          }
+        };
+
+        ws = new WebSocket(wsUrl);
+        ws.onopen = () => {
+          ws.send(JSON.stringify({
+            kind: "hello", role: "viewer", roomCode: room,
+            clientId: crypto.randomUUID(),
+          }));
+        };
+        ws.onmessage = async (ev) => {
+          let m; try { m = JSON.parse(ev.data); } catch { return; }
+          if (m.kind === "offer") {
+            await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            ws.send(JSON.stringify({ kind: "answer", sdp: answer.sdp }));
+          } else if (m.kind === "ice" && m.candidate) {
+            try { await pc.addIceCandidate(m.candidate); } catch (e) { console.warn("ice add failed", e); }
+          } else if (m.kind === "peer-left") {
+            setState("peer left");
+          } else if (m.kind === "error") {
+            setState("err: " + m.message);
+          }
+        };
+        ws.onclose = () => setState("ws closed");
+        ws.onerror = () => setState("ws error");
+      };
+
+      const startStats = () => {
+        if (statsTimer) return;
+        statsTimer = setInterval(async () => {
+          if (!pc) return;
+          const report = await pc.getStats();
+          let kbps = 0, fps = 0, frames = 0, w = 0, h = 0;
+          report.forEach((s) => {
+            if (s.type === "inbound-rtp" && s.kind === "video") {
+              if (typeof s.bytesReceived === "number") {
+                kbps = ((s.bytesReceived - bytesPrev) * 8) / 1000;
+                bytesPrev = s.bytesReceived;
+              }
+              fps = s.framesPerSecond || 0;
+              frames = s.framesDecoded || 0;
+              w = s.frameWidth || 0;
+              h = s.frameHeight || 0;
+            }
+          });
+          stats.textContent =
+            `${w}x${h}  ${fps.toFixed?.(1) ?? fps} fps  ${kbps.toFixed(0)} kbps  ${frames} frames decoded`;
+        }, 1000);
+      };
+
+      $("go").addEventListener("click", connect);
+      $("room").addEventListener("keydown", (e) => { if (e.key === "Enter") connect(); });
+    })();
+  </script>
+</body>
+</html>
