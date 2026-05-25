@@ -1,8 +1,13 @@
 # Extend Windows Desktop to iPad — Technical Design
 
-Status: Draft v0.1 — design only, no code yet.
+Status: Draft v0.1 — design only.
 Owner: tlotlo@b1sa.co.za
 Target platforms: Windows 10 21H2+ / Windows 11; iPadOS 16+.
+
+> **Scope note (2026-05-25):** §1.2 below describes v1.0. The operative
+> scope for what ships **first** is in [MVP.md](./MVP.md) — that is the
+> contract. This document remains the technical reference for the full
+> system across all phases.
 
 ---
 
