@@ -2,17 +2,19 @@
 //
 // M1 scope:
 //   - Connect to the signaling server, exchange offer/answer/ICE.
-//   - Host: add a VP8 video track sourced from a pre-encoded IVF file
-//     (the M1 test pattern). M2 will replace this with live capture +
-//     encoded frames from the Windows-specific capture/encoder pipeline.
+//   - Host: add an H.264 video track sourced from a pre-encoded
+//     Annex-B test pattern (the M1 test asset). M2 will replace this
+//     with live capture + encoded frames from the Windows-specific
+//     capture/encoder pipeline.
 //   - Viewer: accept the offer, decode codecs, count incoming frames.
 //
-// Why VP8 here when iPad needs H.264? VP8 is enough to prove the
-// plumbing - no external encoder/decoder needed, the webrtc crate
-// handles it end-to-end. M1.5 swaps to H.264 once a Mac is in play.
+// H.264 (Constrained Baseline 3.1) is what the iPad's WebRTC.xcframework
+// will negotiate, so we use it here too - that way the Rust host stays
+// codec-identical between M1 (web viewer) and M1.5 (Mac + iPad).
+// Chromium-based browsers also accept H.264 in WebRTC, so the web
+// viewer at /viewer.html works against this host unchanged.
 
 use anyhow::{anyhow, Result};
-use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,27 +24,25 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use webrtc::api::interceptor_registry::register_default_interceptors;
-use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_VP8};
+use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264};
 use webrtc::api::APIBuilder;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidate;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
-use webrtc::media::io::ivf_reader::IVFReader;
+use webrtc::media::io::h264_reader::{H264Reader, NalUnitType};
 use webrtc::media::Sample;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
-use webrtc::rtp_transceiver::rtp_codec::{
-    RTCRtpCodecCapability, RTCRtpCodecParameters, RTPCodecType,
-};
+use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 use webrtc::track::track_local::TrackLocal;
 
 #[derive(Debug, Clone)]
 pub enum Role {
-    Host { ivf_path: PathBuf },
+    Host { media_path: PathBuf },
     Viewer,
 }
 
@@ -89,10 +89,10 @@ pub async fn run(cfg: SessionConfig) -> Result<()> {
 
     // Role-specific wiring.
     match &cfg.role {
-        Role::Host { ivf_path } => {
-            let track = add_vp8_track(&pc).await?;
-            let path = ivf_path.clone();
-            tokio::spawn(pump_ivf_to_track(path, track));
+        Role::Host { media_path } => {
+            let track = add_h264_track(&pc).await?;
+            let path = media_path.clone();
+            tokio::spawn(pump_h264_to_track(path, track));
         }
         Role::Viewer => {
             install_viewer_on_track(&pc);
@@ -174,21 +174,12 @@ pub async fn run(cfg: SessionConfig) -> Result<()> {
 
 async fn build_peer_connection() -> Result<Arc<RTCPeerConnection>> {
     let mut m = MediaEngine::default();
-    // Register VP8 only - keeps the SDP small and the negotiation predictable.
-    m.register_codec(
-        RTCRtpCodecParameters {
-            capability: RTCRtpCodecCapability {
-                mime_type: MIME_TYPE_VP8.to_owned(),
-                clock_rate: 90000,
-                channels: 0,
-                sdp_fmtp_line: "".to_owned(),
-                rtcp_feedback: vec![],
-            },
-            payload_type: 96,
-            ..Default::default()
-        },
-        RTPCodecType::Video,
-    )?;
+    // register_default_codecs registers H.264 (Constrained Baseline and
+    // Constrained High), VP8, VP9, and Opus with the standard SDP fmtp
+    // lines that match what WebRTC.xcframework on iOS and Chromium both
+    // negotiate. Per MVP.md §4 M1.5, profile-level-id=42e01f
+    // (Constrained Baseline 3.1) is the primary target for iPad interop.
+    m.register_default_codecs()?;
     let mut registry = Registry::new();
     registry = register_default_interceptors(registry, &mut m)?;
     let api = APIBuilder::new()
@@ -223,12 +214,12 @@ fn install_state_logging(pc: &Arc<RTCPeerConnection>, done: Arc<Notify>) {
     }));
 }
 
-async fn add_vp8_track(
+async fn add_h264_track(
     pc: &Arc<RTCPeerConnection>,
 ) -> Result<Arc<TrackLocalStaticSample>> {
     let track = Arc::new(TrackLocalStaticSample::new(
         RTCRtpCodecCapability {
-            mime_type: MIME_TYPE_VP8.to_owned(),
+            mime_type: MIME_TYPE_H264.to_owned(),
             ..Default::default()
         },
         "video".to_owned(),
@@ -246,45 +237,57 @@ async fn add_vp8_track(
     Ok(track)
 }
 
-async fn pump_ivf_to_track(path: PathBuf, track: Arc<TrackLocalStaticSample>) {
-    if let Err(e) = pump_ivf_inner(path, track).await {
-        error!(?e, "ivf pump terminated");
+async fn pump_h264_to_track(path: PathBuf, track: Arc<TrackLocalStaticSample>) {
+    if let Err(e) = pump_h264_inner(path, track).await {
+        error!(?e, "h264 pump terminated");
     }
 }
 
-async fn pump_ivf_inner(path: PathBuf, track: Arc<TrackLocalStaticSample>) -> Result<()> {
-    info!(?path, "starting ivf playback loop");
-    // Loop indefinitely. Each pass re-opens the file so we don't have to
-    // implement seek; M1's test pattern is short on purpose.
+async fn pump_h264_inner(path: PathBuf, track: Arc<TrackLocalStaticSample>) -> Result<()> {
+    info!(?path, "starting h264 playback loop");
+    // 30 fps source - hardcoded for the M1 test pattern. M2 takes its
+    // frame timing from the real capture clock.
+    let frame_period = Duration::from_millis(33);
+    // Loop indefinitely. Each pass re-reads the file from scratch (no
+    // seek logic needed for a 4-second asset).
     loop {
         let bytes = tokio::fs::read(&path).await?;
-        let mut cursor = std::io::Cursor::new(bytes);
-        let (mut reader, header) = IVFReader::new(&mut cursor)?;
-        let denom = header.timebase_denominator as u64;
-        let numer = header.timebase_numerator as u64;
-        if denom == 0 {
-            return Err(anyhow!("ivf timebase denominator is zero"));
-        }
-        // Frame period in nanoseconds (assumes constant frame rate).
-        let frame_ns = 1_000_000_000u64 * numer / denom;
-        let frame_period = Duration::from_nanos(frame_ns.max(1));
-        let mut frames = 0u64;
+        let cursor = std::io::Cursor::new(bytes);
+        let mut reader = H264Reader::new(cursor, 1024 * 1024);
+        let mut nals = 0u64;
         loop {
-            let frame = match reader.parse_next_frame() {
-                Ok((data, _hdr)) => data,
-                Err(_) => break, // end of file
+            let nal = match reader.next_nal() {
+                Ok(n) => n,
+                Err(_) => break, // end of stream
             };
+            // Each NAL becomes one sample. SPS (type 7), PPS (type 8),
+            // and SEI go through as zero-duration parameter-set samples;
+            // IDR/P slices carry the frame_period. For Constrained
+            // Baseline with no B-frames and -g 30, almost every NAL is
+            // exactly one frame, so pacing on frame_period gives ~30 fps.
+            let is_picture_slice = matches!(
+                nal.unit_type,
+                NalUnitType::CodedSliceNonIdr | NalUnitType::CodedSliceIdr
+            );
+            let duration = if is_picture_slice {
+                frame_period
+            } else {
+                Duration::from_secs(0)
+            };
+            let data = nal.data.freeze();
             track
                 .write_sample(&Sample {
-                    data: Bytes::from(frame),
-                    duration: frame_period,
+                    data,
+                    duration,
                     ..Default::default()
                 })
                 .await?;
-            frames += 1;
-            tokio::time::sleep(frame_period).await;
+            nals += 1;
+            if is_picture_slice {
+                tokio::time::sleep(frame_period).await;
+            }
         }
-        debug!(frames, "ivf loop iteration complete, restarting");
+        debug!(nals, "h264 loop iteration complete, restarting");
     }
 }
 

@@ -21,9 +21,9 @@ struct Args {
     #[arg(long)]
     room: String,
 
-    /// IVF test pattern (M1 only - replaced by live capture in M2).
-    #[arg(long, default_value = "assets/testpattern.ivf")]
-    ivf: PathBuf,
+    /// H.264 Annex-B test pattern (M1 only - replaced by live capture in M2).
+    #[arg(long, default_value = "assets/testpattern.h264")]
+    media: PathBuf,
 }
 
 #[tokio::main]
@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
     transport::run(transport::SessionConfig {
         signaling_url: args.signaling,
         room_code: args.room,
-        role: transport::Role::Host { ivf_path: args.ivf },
+        role: transport::Role::Host { media_path: args.media },
     })
     .await?;
     Ok(())
